@@ -1,14 +1,12 @@
-# ============================ target_input.dat ==============================
-SRIM_FILE       srim_C12_in_Si.txt   # SRIM "Stopping/Range Table" output for THIS beam in THIS target
-THICKNESS       100.0
-THICKNESS_UNIT  um                   # nm | um | mm | cm | ug/cm2 | mg/cm2 | g/cm2
-DENSITY         2.321                # g/cm3
+# Compound target geometry and stopping table
+thickness_mm = 1.0
+density_g_cm3 = 1.0
 
-NUM_ELEMENTS    1
-# ELEMENT  Z   A    MOLAR_MASS[g/mol]  FRACTION (atomic / stoichiometric; normalised)
-ELEMENT    14  28   28.0855            1.0
+# Effective values are used only for approximate multiple scattering.
+effective_Z = 6
+effective_A = 12
 
-# Compound example (SiO2):
-# NUM_ELEMENTS 2
-# ELEMENT  14  28  28.0855  1
-# ELEMENT   8  16  15.999   2
+# SRIM table generated for the actual beam ion in the complete compound target.
+stopping_table = Ga63_in_CH2.srim
+srim_energy_unit = keV
+srim_stopping_unit = MeV_cm2_g

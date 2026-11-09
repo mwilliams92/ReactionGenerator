@@ -1,6 +1,6 @@
 # BeamMC
 
-Standalone C++11 Monte Carlo for energy loss, Gaussian energy straggling, approximate Highland multiple scattering, and optional two-body reaction recoils.
+Standalone C++11 Monte Carlo for beam energy loss, straggling, approximate multiple scattering, and two-body reaction recoils.
 
 ## Build and run
 
@@ -10,90 +10,52 @@ g++ -O2 -std=c++11 BeamMC.cpp -o BeamMC
 ./BeamMC reaction
 ```
 
-The executable reads these files from the current directory:
+The executable reads `beam_input.txt`, `target_input.dat`, `degrader_input.txt`, and, in reaction mode, `input_reaction.txt`.
 
-- `beam_input.txt`
-- `target_input.dat`
-- `degrader_input.txt`
-- `input_reaction.txt` (only in `reaction` mode)
+## Stopping tables
 
-Outputs are CSV files. Beam-mode output is controlled by `output` in `beam_input.txt`; reaction mode writes `reaction_output.csv`.
+The code uses one SRIM stopping table for the complete material rather than separate tables for each element. This is appropriate for compound-target SRIM calculations such as `Ga64_in_CH2.srim`.
 
-## beam_input.txt
-
-```text
-Z = 31
-A = 64
-energy_MeV = 100.0
-energy_spread_MeV = 0.5
-emittance_x_mm_mrad = 2.0
-emittance_y_mm_mrad = 2.0
-beam_sigma_x_mm = 1.0
-beam_sigma_y_mm = 1.0
-particles = 100000
-step_mm = 0.01
-seed = 12345
-output = beam_output.csv
-straggling_coefficient = 0.02
-```
-
-Emittances are geometric rms emittances in mm mrad. The initial rms angular spreads are calculated as `emittance / beam_sigma`, converted to radians. `energy_spread_MeV` is a Gaussian sigma.
-
-## target_input.dat
-
-Fractions are interpreted as **mass fractions** and are normalized automatically.
+A material file contains:
 
 ```text
 thickness_mm = 1.0
-density_g_cm3 = 1.0
+density_g_cm3 = 0.95
+effective_Z = 6
+effective_A = 12
+stopping_table = Ga64_in_CH2.srim
 srim_energy_unit = keV
 srim_stopping_unit = MeV_cm2_g
-element = 1 1 1.00794 1.0 srim_H.dat
 ```
 
-For a compound or mixture, add one `element = ...` line per element:
+`effective_Z` and `effective_A` are used only for approximate multiple scattering. The stopping table must be generated for the actual projectile ion in the complete compound material. The parser takes the first numeric column as energy and the last numeric column as stopping power; headers are ignored.
+
+## Reaction stopping tables
+
+Reaction mode reads these additional entries from `input_reaction.txt`:
 
 ```text
-element = 6 12 12.011 0.50 srim_C.dat
-element = 8 16 15.999 0.50 srim_O.dat
+beam_srim_target = Ga64_in_CH2.srim
+recoil_srim_target = Zn61_in_CH2.srim
+recoil_srim_degrader = Zn61_in_degrader.srim
 ```
 
-Each SRIM file must contain numeric rows whose first numeric column is energy and whose last numeric column is stopping power. Header text is ignored. The default stopping-power unit is `MeV_cm2_g`; `MeV_cm2_mg` and `keV_um` are also accepted. Set the unit explicitly for your SRIM export.
+`beam_srim_target` is used for the incoming beam before the reaction. `recoil_srim_target` is used for the recoil while it traverses the remaining target. `recoil_srim_degrader` is used after the target. The degrader is skipped when `enabled = 0`; its reaction-specific table is then not needed.
 
-## degrader_input.txt
+## Input files
 
-Set `enabled = 0` to bypass the degrader. When enabled, use the same material format as the target:
+`beam_input.txt` specifies beam species, energy, energy spread, emittance, spot size, particle count, step size, random seed, output file, and straggling coefficient.
 
-```text
-enabled = 1
-thickness_mm = 0.05
-density_g_cm3 = 2.0
-srim_energy_unit = keV
-srim_stopping_unit = MeV_cm2_g
-element = 6 12 12.011 1.0 srim_C.dat
-```
+`target_input.dat` specifies target thickness, density, effective scattering parameters, and the beam stopping table.
 
-## input_reaction.txt
+`degrader_input.txt` specifies whether the degrader is enabled, its thickness and density, effective scattering parameters, and its stopping table for ordinary beam mode. In reaction mode, `recoil_srim_degrader` overrides this stopping table for the recoil.
 
-```text
-beam_Z = 31
-beam_A = 64
-target_Z = 1
-target_A = 1
-ejectile_Z = 2
-ejectile_A = 4
-recoil_Z = 30
-recoil_A = 61
-recoil_excitation_MeV = 0.0
-q_value_MeV = 0.0
-```
+`input_reaction.txt` specifies beam, target, ejectile, and recoil Z/A values, recoil excitation energy, Q value, and reaction-specific stopping tables.
 
-`q_value_MeV` is optional but should be supplied for a physical reaction. The requested input species and excitation energy alone do not determine Q; nuclear mass excesses are required. The reaction model samples an isotropic centre-of-mass angle, calculates non-relativistic two-body kinematics, then transports the recoil through the remaining target and optional degrader.
+## Output
 
-## Output angles
+Energies are in MeV, positions in mm, and `theta_x_mrad`/`theta_y_mrad` are horizontal and vertical angles in mrad relative to the nominal beam axis.
 
-`theta_x_mrad` and `theta_y_mrad` are horizontal and vertical angles relative to the nominal beam axis, in mrad. Positions are in mm and energies are in MeV.
+For each reaction event, the reaction depth is sampled uniformly between the target entrance and exit. The incoming beam is transported through that depth using `beam_srim_target`; the two-body recoil is then generated at that location and transported through the remaining target thickness using `recoil_srim_target`, followed by the optional degrader using `recoil_srim_degrader`. Thus, recoil energy loss in the residual target is included before degrader transport. The model samples an isotropic centre-of-mass angle and uses non-relativistic two-body kinematics.
 
-## Physics scope
-
-This is a practical baseline implementation, not a replacement for a validated transport code. It uses linear interpolation of SRIM stopping tables, a Gaussian straggling model, and the Highland multiple-scattering approximation. Validate against SRIM/TRIM or experimental data before using it for a production analysis. Reaction target recoil energy loss is simulated; energy loss of the ejectile is not needed for the recoil output and is therefore not generated.
+This is a baseline model using linear stopping-power interpolation, Gaussian straggling, and approximate Highland multiple scattering. Validate it against SRIM/TRIM or experimental data before production use.

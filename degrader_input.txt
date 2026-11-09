@@ -1,12 +1,10 @@
-# =========================== degrader_input.txt =============================
-USE_DEGRADER    1                    # 1 = place degrader after target, 0 = no degrader
-DRIFT_DISTANCE  0.0                  # mm of free space between target and degrader
+# Set enabled = 0 to omit the degrader
+enabled = 0
+thickness_mm = 0.008
+density_g_cm3 = 2.7
 
-SRIM_FILE       srim_C12_in_Al.txt   # SRIM table for the beam in the degrader material
-THICKNESS       20.0
-THICKNESS_UNIT  um
-DENSITY         2.70
-
-NUM_ELEMENTS    1
-# ELEMENT  Z   A    MOLAR_MASS  FRACTION
-ELEMENT    13  27   26.9815     1.0
+effective_Z = 13
+effective_A = 27
+stopping_table = recoil_in_degrader.srim
+srim_energy_unit = keV
+srim_stopping_unit = MeV_cm2_g

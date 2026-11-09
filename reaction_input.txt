@@ -1,0 +1,19 @@
+# Example: 64Ga(p,alpha)61Zn
+beam_Z = 31
+beam_A = 64
+target_Z = 1
+target_A = 1
+ejectile_Z = 2
+ejectile_A = 4
+recoil_Z = 30
+recoil_A = 61
+recoil_excitation_MeV = 0.0
+q_value_MeV = 0.0
+
+# SRIM tables for the compound target and optional degrader.
+# These must be generated for the indicated projectile ion in the complete material.
+beam_srim_target = Ga64_in_CH2.srim
+recoil_srim_target = Zn61_in_CH2.srim
+recoil_srim_degrader = Zn61_in_degrader.srim
+
+output = reaction_output.csv
