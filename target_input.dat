@@ -1,0 +1,14 @@
+# ============================ target_input.dat ==============================
+SRIM_FILE       srim_C12_in_Si.txt   # SRIM "Stopping/Range Table" output for THIS beam in THIS target
+THICKNESS       100.0
+THICKNESS_UNIT  um                   # nm | um | mm | cm | ug/cm2 | mg/cm2 | g/cm2
+DENSITY         2.321                # g/cm3
+
+NUM_ELEMENTS    1
+# ELEMENT  Z   A    MOLAR_MASS[g/mol]  FRACTION (atomic / stoichiometric; normalised)
+ELEMENT    14  28   28.0855            1.0
+
+# Compound example (SiO2):
+# NUM_ELEMENTS 2
+# ELEMENT  14  28  28.0855  1
+# ELEMENT   8  16  15.999   2

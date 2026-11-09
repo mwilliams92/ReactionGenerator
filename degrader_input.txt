@@ -1,0 +1,12 @@
+# =========================== degrader_input.txt =============================
+USE_DEGRADER    1                    # 1 = place degrader after target, 0 = no degrader
+DRIFT_DISTANCE  0.0                  # mm of free space between target and degrader
+
+SRIM_FILE       srim_C12_in_Al.txt   # SRIM table for the beam in the degrader material
+THICKNESS       20.0
+THICKNESS_UNIT  um
+DENSITY         2.70
+
+NUM_ELEMENTS    1
+# ELEMENT  Z   A    MOLAR_MASS  FRACTION
+ELEMENT    13  27   26.9815     1.0
