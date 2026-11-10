@@ -1,12 +1,12 @@
 # Compound target geometry and stopping table
-thickness_mm = 1.0
-density_g_cm3 = 1.0
+thickness_mm = 0.0034
+density_g_cm3 = 1.6
 
 # Effective values are used only for approximate multiple scattering.
 effective_Z = 6
 effective_A = 12
 
 # SRIM table generated for the actual beam ion in the complete compound target.
-stopping_table = Ga63_in_CH2.srim
-srim_energy_unit = keV
-srim_stopping_unit = MeV_cm2_g
+stopping_table = SRIM_Files/Strontium_in_SiHe.txt
+srim_energy_unit = auto
+srim_stopping_unit = auto

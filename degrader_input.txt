@@ -1,10 +1,10 @@
 # Set enabled = 0 to omit the degrader
-enabled = 0
+enabled = 1
 thickness_mm = 0.008
 density_g_cm3 = 2.7
 
 effective_Z = 13
 effective_A = 27
-stopping_table = recoil_in_degrader.srim
-srim_energy_unit = keV
-srim_stopping_unit = MeV_cm2_g
+stopping_table = SRIM_Files/Strontium_in_Al.txt
+srim_energy_unit = auto
+srim_stopping_unit = auto

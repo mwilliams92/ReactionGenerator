@@ -1,34 +1,30 @@
-# ============================ beam_input.txt ================================
-# Format:  KEY  value      ('#' = comment)
+# =====================================================================
+# BEAM INPUT
+# =====================================================================
 
-# ---- Species -------------------------------------------------------------
-BEAM_Z            6          # atomic number of the projectile
-BEAM_A            12.0       # mass number (or atomic mass in u)
+# PARTICLE SPECIES
+Z                              38
+A                              93
 
-# ---- Energy --------------------------------------------------------------
-BEAM_ENERGY       10.0       # value, in ENERGY_UNIT
-ENERGY_UNIT       MeV/u      # MeV | MeV/u | keV | keV/u | GeV | GeV/u
-ENERGY_SPREAD     0.1        # value, interpreted via ENERGY_SPREAD_MODE
-ENERGY_SPREAD_MODE sigma_percent   # sigma_percent | fwhm_percent | sigma_abs | fwhm_abs
-                                   # (abs uses the same unit as ENERGY_UNIT)
+# BEAM ENERGY
+BEAM_ENERGY                    279.0
+BEAM_ENERGY_UNIT               MeV
+ENERGY_SPREAD                  0.0
+ENERGY_SPREAD_MODE             sigma_percent
 
-# ---- Transverse emittance at target entrance (rms, geometric) -------------
-# Units: EMITTANCE in pi*mm*mrad, BETA in m (= mm/mrad), ALPHA dimensionless.
-# Gaussian beam: sigma_x = sqrt(eps*beta) [mm], sigma_x' = sqrt(eps*(1+alpha^2)/beta) [mrad]
-EMITTANCE_X       2.0
-BETA_X            1.0
-ALPHA_X           0.0
-EMITTANCE_Y       2.0
-BETA_Y            1.0
-ALPHA_Y           0.0
+# TRANSVERSE BEAM PARAMETERS
+EMITTANCE_X_MM_MRAD            2.0
+EMITTANCE_Y_MM_MRAD            2.0
+BEAM_SIGMA_X_MM                1.0
+BEAM_SIGMA_Y_MM                1.0
 
-# ---- Run / output --------------------------------------------------------
-NUM_PARTICLES     100000
-RANDOM_SEED       12345      # 0 = different seed every run
-OUTPUT_FILE       beam_output   # -> beam_output.root / .txt / .png
-WRITE_TEXT        1          # also write ASCII file for the ion-optics code
+# SIMULATION PARAMETERS
+PARTICLES                      100000
+STEP_UM                        0.1
+STRAGGLING_COEFFICIENT         1.00
+SEED                           12345
 
-# ---- Physics settings (optional) -----------------------------------------
-MAX_ENERGY_LOSS_PER_STEP 0.01   # max fractional energy loss per step
-STRAGGLING_MODEL  2          # 0 = off, 1 = Bohr, 2 = Bohr + low-velocity reduction
-ANGULAR_SCATTERING 1         # 1 = multiple scattering (Highland), 0 = off
+# OUTPUT
+OUTPUT                         beam_output.csv
+ROOT_OUTPUT                    1
+ROOT_FILE                      beam_output.root
