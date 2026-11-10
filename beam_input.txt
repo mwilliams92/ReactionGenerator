@@ -1,30 +1,32 @@
-# =====================================================================
-# BEAM INPUT
-# =====================================================================
+# ============================================================================
+# BEAM SPECIES AND ENERGY
+# ============================================================================
+BEAM_Z                     38
+BEAM_A                     93
+BEAM_ENERGY                279.0
+BEAM_ENERGY_UNIT           MeV
+ENERGY_SPREAD              0.1
+ENERGY_SPREAD_MODE         sigma_percent
 
-# PARTICLE SPECIES
-Z                              38
-A                              93
-
-# BEAM ENERGY
-BEAM_ENERGY                    279.0
-BEAM_ENERGY_UNIT               MeV
-ENERGY_SPREAD                  0.0
-ENERGY_SPREAD_MODE             sigma_percent
-
+# ============================================================================
 # TRANSVERSE BEAM PARAMETERS
-EMITTANCE_X_MM_MRAD            2.0
-EMITTANCE_Y_MM_MRAD            2.0
-BEAM_SIGMA_X_MM                1.0
-BEAM_SIGMA_Y_MM                1.0
+# ============================================================================
+EMITTANCE_X_MM_MRAD        2.0
+EMITTANCE_Y_MM_MRAD        2.0
+BEAM_SIGMA_X_MM            1.0
+BEAM_SIGMA_Y_MM            1.0
 
-# SIMULATION PARAMETERS
-PARTICLES                      100000
-STEP_UM                        0.1
-STRAGGLING_COEFFICIENT         1.00
-SEED                           12345
+# ============================================================================
+# MONTE CARLO AND TRANSPORT
+# ============================================================================
+PARTICLES                  100000
+STEP_UM                    0.1
+BOHR_STRAGGLING_SCALE      1.0
+SEED                       12345
+OUTPUT                     beam_output.csv
 
-# OUTPUT
-OUTPUT                         beam_output.csv
-ROOT_OUTPUT                    1
-ROOT_FILE                      beam_output.root
+# ============================================================================
+# OPTIONAL ROOT OUTPUT
+# ============================================================================
+ROOT_OUTPUT                0
+ROOT_FILE                  beam_output.root

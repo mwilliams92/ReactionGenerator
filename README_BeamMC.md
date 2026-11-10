@@ -81,8 +81,8 @@ BEAM_Z                     38
 BEAM_A                     93
 BEAM_ENERGY                279.0
 BEAM_ENERGY_UNIT           MeV
-ENERGY_SPREAD              0.0
-ENERGY_SPREAD_MODE         sigma_abs
+ENERGY_SPREAD              0.1
+ENERGY_SPREAD_MODE         sigma_percent
 
 # ============================================================================
 # TRANSVERSE BEAM PARAMETERS
