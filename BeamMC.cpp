@@ -18,6 +18,8 @@
 //   g++ -O2 -std=c++11 -DBEAMMC_WITH_ROOT BeamMC.cpp -o BeamMC $(root-config --cflags --libs)
 // -----------------------------------------------------------------------------
 
+#include "TwoBodyKinematics.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -255,8 +257,8 @@ BeamConfig readBeam(const std::string& filename)
     const auto values = readKeyValueFile(filename);
     BeamConfig beam;
 
-    beam.Z = getInt(values, "Z");
-    beam.A = getInt(values, "A");
+    beam.Z = getInt(values, "BEAM_Z");
+    beam.A = getInt(values, "BEAM_A");
     beam.energyValue = getDouble(values, "BEAM_ENERGY");
     beam.energyUnit = getString(values, "BEAM_ENERGY_UNIT", "MeV");
     beam.energySpreadValue = getDouble(values, "ENERGY_SPREAD", 0.0);
@@ -718,76 +720,30 @@ Particle generateRecoil(const Particle& incoming,
                         const ReactionConfig& reaction,
                         std::mt19937_64& random)
 {
-    Particle recoil;
-
-    const double beamMass = reaction.beamA * AMU_MEV;
-    const double targetMass = reaction.targetA * AMU_MEV;
-    const double recoilMass = reaction.recoilA * AMU_MEV;
-    const double ejectileMass = reaction.ejectileA * AMU_MEV;
-
-    // Non-relativistic centre-of-mass energy and available final-state energy.
-    const double centreOfMassEnergy =
-        incoming.E * targetMass / (beamMass + targetMass);
-    const double availableEnergy = centreOfMassEnergy + reaction.qValueMeV -
-        reaction.excitationMeV;
-
-    if (availableEnergy <= 0.0) {
-        return recoil;
-    }
-
-    const double reducedFinalMass =
-        ejectileMass * recoilMass / (ejectileMass + recoilMass);
-    const double finalMomentum =
-        std::sqrt(2.0 * reducedFinalMass * availableEnergy);
-    const double initialMomentum =
-        std::sqrt(2.0 * beamMass * incoming.E);
-
-    // Isotropic emission in the centre-of-mass frame.
     const double cosTheta =
         2.0 * std::generate_canonical<double, 64>(random) - 1.0;
-    const double sinTheta = std::sqrt(1.0 - cosTheta * cosTheta);
+    const double theta = std::acos(cosTheta);
     const double phi = 2.0 * PI *
         std::generate_canonical<double, 64>(random);
 
-    // Construct an orthonormal basis around the incoming beam direction.
-    const Vec3 zAxis = unitVector(incoming.dir);
-    const Vec3 reference = std::fabs(zAxis.z) < 0.9
-        ? Vec3(0.0, 0.0, 1.0)
-        : Vec3(0.0, 1.0, 0.0);
+    BeamMC::TwoBodyKinematics kinematics(
+        reaction.beamZ, reaction.beamA,
+        reaction.targetZ, reaction.targetA,
+        reaction.ejectileZ, reaction.ejectileA,
+        reaction.recoilZ, reaction.recoilA,
+        reaction.qValueMeV, reaction.excitationMeV);
 
-    const Vec3 xAxis = unitVector(Vec3(
-        reference.y * zAxis.z - reference.z * zAxis.y,
-        reference.z * zAxis.x - reference.x * zAxis.z,
-        reference.x * zAxis.y - reference.y * zAxis.x));
+    const BeamMC::KinematicsVector beamDirection(
+        incoming.dir.x, incoming.dir.y, incoming.dir.z);
+    kinematics.calculate(incoming.E, theta, phi, beamDirection);
 
-    const Vec3 yAxis(
-        zAxis.y * xAxis.z - zAxis.z * xAxis.y,
-        zAxis.z * xAxis.x - zAxis.x * xAxis.z,
-        zAxis.x * xAxis.y - zAxis.y * xAxis.x);
+    const BeamMC::KinematicsVector& direction =
+        kinematics.getRecoilDirection();
 
-    const Vec3 centreOfMassDirection(
-        sinTheta * std::cos(phi),
-        sinTheta * std::sin(phi),
-        cosTheta);
-
-    const Vec3 ejectileMomentum = scale(
-        add(add(scale(xAxis, centreOfMassDirection.x),
-                scale(yAxis, centreOfMassDirection.y)),
-            scale(zAxis, centreOfMassDirection.z)),
-        finalMomentum);
-
-    // Momentum conservation gives the recoil momentum in the lab frame.
-    const Vec3 recoilMomentum = add(
-        scale(zAxis, initialMomentum),
-        scale(ejectileMomentum, -1.0));
-
+    Particle recoil;
     recoil.p = incoming.p;
-    recoil.dir = unitVector(recoilMomentum);
-    recoil.E = (recoilMomentum.x * recoilMomentum.x +
-                recoilMomentum.y * recoilMomentum.y +
-                recoilMomentum.z * recoilMomentum.z) /
-               (2.0 * recoilMass);
-
+    recoil.dir = Vec3(direction.x, direction.y, direction.z);
+    recoil.E = kinematics.getRecoilEnergyMeV();
     return recoil;
 }
 
