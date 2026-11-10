@@ -1,3 +1,4 @@
 *.root
 *.csv
 SRIM_Files/
+BeamMC
