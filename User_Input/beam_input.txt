@@ -28,5 +28,5 @@ OUTPUT                     beam_output.csv
 # ============================================================================
 # OPTIONAL ROOT OUTPUT
 # ============================================================================
-ROOT_OUTPUT                0
+ROOT_OUTPUT                1
 ROOT_FILE                  beam_output.root

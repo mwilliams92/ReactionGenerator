@@ -19,6 +19,8 @@
 // -----------------------------------------------------------------------------
 
 #include "TwoBodyKinematics.h"
+#include "ExcitationPopulation.h"
+#include "ReactionCrossSection.h"
 
 #include <algorithm>
 #include <cctype>
@@ -97,10 +99,12 @@ struct ReactionConfig {
 
     double excitationMeV = 0.0;
     double qValueMeV = 0.0;
+    std::string excitationPopulationFile;
 
     std::string beamTargetSRIM;
     std::string recoilTargetSRIM;
     std::string recoilDegraderSRIM;
+	std::string reactionCrossSectionFile;
     std::string output = "reaction_output.csv";
 };
 
@@ -352,13 +356,16 @@ ReactionConfig readReaction(const std::string& filename)
     reaction.recoilZ = getInt(values, "recoil_Z");
     reaction.recoilA = getInt(values, "recoil_A");
 
-    reaction.excitationMeV = getDouble(
-        values, "recoil_excitation_MeV");
+    reaction.excitationMeV = getDouble(values, "recoil_excitation_MeV");
     reaction.qValueMeV = getDouble(values, "q_value_MeV");
+    reaction.excitationPopulationFile = getString(values, "recoil_excitation_population_file");
 
     reaction.beamTargetSRIM = getString(values, "beam_srim_target");
     reaction.recoilTargetSRIM = getString(values, "recoil_srim_target");
     reaction.recoilDegraderSRIM = getString(values, "recoil_srim_degrader");
+
+	reaction.reactionCrossSectionFile = getString(values, "reaction_cross_section_file");
+
     reaction.output = getString(values, "output", reaction.output);
 
     if (reaction.beamA <= 0 || reaction.targetA <= 0 ||
@@ -718,7 +725,8 @@ void propagate(Particle& particle,
 
 Particle generateRecoil(const Particle& incoming,
                         const ReactionConfig& reaction,
-                        std::mt19937_64& random)
+                        std::mt19937_64& random,
+                        const BeamMC::ExcitationPopulation* population)
 {
     const double cosTheta =
         2.0 * std::generate_canonical<double, 64>(random) - 1.0;
@@ -726,12 +734,16 @@ Particle generateRecoil(const Particle& incoming,
     const double phi = 2.0 * PI *
         std::generate_canonical<double, 64>(random);
 
+    const double excitationMeV = population != 0
+        ? population->sample(random)
+        : reaction.excitationMeV;
+
     BeamMC::TwoBodyKinematics kinematics(
         reaction.beamZ, reaction.beamA,
         reaction.targetZ, reaction.targetA,
         reaction.ejectileZ, reaction.ejectileA,
         reaction.recoilZ, reaction.recoilA,
-        reaction.qValueMeV, reaction.excitationMeV);
+        reaction.qValueMeV, excitationMeV);
 
     const BeamMC::KinematicsVector beamDirection(
         incoming.dir.x, incoming.dir.y, incoming.dir.z);
@@ -794,9 +806,9 @@ int main(int argc, char** argv)
     try {
         const std::string mode = argv[1];
 
-        const BeamConfig beam = readBeam("beam_input.txt");
-        Material target = readMaterial("target_input.dat");
-        DegraderConfig degrader = readDegrader("degrader_input.txt");
+        const BeamConfig beam = readBeam("User_Input/beam_input.txt");
+        Material target = readMaterial("User_Input/target_input.dat");
+        DegraderConfig degrader = readDegrader("User_Input/degrader_input.txt");
         std::mt19937_64 random(beam.seed);
 
         // Build the default target and degrader models. Reaction mode replaces
@@ -818,7 +830,12 @@ int main(int argc, char** argv)
         ReactionConfig reaction;
 
         if (mode == "reaction") {
-            reaction = readReaction("reaction_input.txt");
+            reaction = readReaction("User_Input/reaction_input.txt");
+
+            BeamMC::ExcitationPopulation excitationPopulation;
+            if (!reaction.excitationPopulationFile.empty()) {
+                excitationPopulation.load(reaction.excitationPopulationFile);
+            }
 
             if (beam.Z != reaction.beamZ || beam.A != reaction.beamA) {
                 std::cerr << "Warning: beam species differ between input files\n";
@@ -849,6 +866,8 @@ int main(int argc, char** argv)
             output << "E_recoil_MeV,theta_x_mrad,theta_y_mrad,"
                       "x_mm,y_mm,z_mm\n";
 
+            long long kinematicallyRejectedEvents = 0;
+
             for (int event = 0; event < beam.particles; ++event) {
                 Particle incoming = generateInitialBeamParticle(beam, random);
                 const Particle incident = incoming;
@@ -865,9 +884,19 @@ int main(int argc, char** argv)
                           beam.Z, beam.A, beam.stragglingCoefficient, random);
 
                 // Generate the recoil at the reaction point.
-                Particle recoil = generateRecoil(incoming, reaction, random);
+                const BeamMC::ExcitationPopulation* population =
+                    excitationPopulation.empty() ? 0 : &excitationPopulation;
+                Particle recoil = generateRecoil(
+                    incoming, reaction, random, population);
 
-                if (recoil.E > 0.0) {
+                // A zero recoil energy means the sampled excitation is not
+                // kinematically accessible at this reaction energy.
+                if (recoil.E <= 0.0) {
+                    ++kinematicallyRejectedEvents;
+                    continue;
+                }
+
+                {
                     // The recoil traverses the remainder of the target. The
                     // path is angle-corrected and supports forward/backward
                     // recoils exiting through either target surface.
@@ -898,6 +927,11 @@ int main(int argc, char** argv)
                 if (rootWriter) rootWriter->fill(incident, recoil);
 #endif
             }
+
+            std::cerr << "Reaction events rejected because the sampled "
+                      << "excitation was kinematically inaccessible: "
+                      << kinematicallyRejectedEvents << " / "
+                      << beam.particles << "\n";
         } else {
             output.open(beam.output);
             output << "E_out_MeV,theta_x_mrad,theta_y_mrad,"

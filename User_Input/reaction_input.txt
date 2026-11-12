@@ -8,6 +8,7 @@ ejectile_A = 1
 recoil_Z = 40
 recoil_A = 96
 recoil_excitation_MeV = 0.0
+RECOIL_EXCITATION_POPULATION_FILE  User_Input/population_Z40_A96.csv
 q_value_MeV = -0.293
 
 # SRIM tables for the compound target and optional degrader.
@@ -15,5 +16,7 @@ q_value_MeV = -0.293
 beam_srim_target = SRIM_Files/Strontium_in_SiHe.txt
 recoil_srim_target = SRIM_Files/Zirconium_in_SiHe.txt
 recoil_srim_degrader = SRIM_Files/Zirconium_in_Al.txt
+
+REACTION_CROSS_SECTION_FILE   User_Input/rp040096.tot
 
 output = reaction_output.csv
