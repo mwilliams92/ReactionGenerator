@@ -11,6 +11,11 @@ recoil_excitation_MeV = 0.0
 RECOIL_EXCITATION_POPULATION_FILE  User_Input/population_Z40_A96.csv
 q_value_MeV = -0.293
 
+# ============================================================================
+# RECOIL NEUTRON SEPARATION ENERGY
+# ============================================================================
+RECOIL_NEUTRON_SEPARATION_MEV   7.85
+
 # SRIM tables for the compound target and optional degrader.
 # These must be generated for the indicated projectile ion in the complete material.
 beam_srim_target = SRIM_Files/Strontium_in_SiHe.txt

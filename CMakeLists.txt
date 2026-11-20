@@ -7,7 +7,9 @@ option(BEAMMC_WITH_ROOT "Enable ROOT histogram and TTree output" OFF)
 add_executable(BeamMC
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamMC.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ExcitationPopulation.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/ReactionCrossSection.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/TwoBodyKinematics.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/ChargeState.cpp"
 )
 
 target_compile_features(BeamMC PRIVATE cxx_std_11)

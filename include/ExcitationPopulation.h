@@ -32,10 +32,13 @@ public:
 
     const std::vector<ExcitationLevel>& levels() const;
 
+	void setMaxExcitationMeV(double e) { maxExcitationMeV_ = e; }
+
 private:
     std::vector<ExcitationLevel> levels_;
     std::vector<double> cumulativeWeights_;
     double totalWeight_;
+	double maxExcitationMeV_;
 };
 
 } // namespace BeamMC

@@ -9,18 +9,19 @@
 //   * Recoil transport through the remaining target and optional degrader
 //
 // Build:
-//   g++ -O2 -std=c++11 BeamMC.cpp -o BeamMC
+//   rm -rf build
+//   cmake -S . -B build -DBEAMMC_WITH_ROOT=ON
+//   cmake --build build -j
 //
 // Run:
 //   ./BeamMC beam
 //   ./BeamMC reaction
-// Optional ROOT support:
-//   g++ -O2 -std=c++11 -DBEAMMC_WITH_ROOT BeamMC.cpp -o BeamMC $(root-config --cflags --libs)
 // -----------------------------------------------------------------------------
 
 #include "TwoBodyKinematics.h"
 #include "ExcitationPopulation.h"
 #include "ReactionCrossSection.h"
+#include "ChargeState.h"
 
 #include <algorithm>
 #include <cctype>
@@ -56,8 +57,7 @@ struct Material {
     double effectiveZ = 6.0;           // Used for approximate scattering only
     double effectiveA = 12.0;          // Used for approximate scattering only
     std::string srimFile;
-    // "auto" reads the units from the SRIM header/table.
-    std::string energyUnit = "auto";
+    std::string energyUnit = "auto";   // "auto" reads SRIM header
     std::string stoppingUnit = "auto";
 };
 
@@ -66,25 +66,30 @@ struct BeamConfig {
     int A = 0;
     double energyValue = 0.0;
     std::string energyUnit = "MeV";
+
     double energySpreadValue = 0.0;
     std::string energySpreadMode = "sigma_abs";
+
     double energyMeV = 0.0;
     double energySpreadMeV = 0.0;
+
     double emittanceX = 0.0;           // mm mrad
     double emittanceY = 0.0;           // mm mrad
     double sigmaXmm = 1.0;
     double sigmaYmm = 1.0;
+
     double stepMm = 0.01;
     double stragglingCoefficient = 0.02;
+
     int particles = 10000;
     unsigned long long seed = 0;
+
     std::string output = "beam_output.csv";
+
     bool rootOutput = false;
     std::string rootFile = "beam_output.root";
-};
 
-struct DegraderConfig : Material {
-    bool enabled = false;
+	double reducedWidthW = 0.7;
 };
 
 struct ReactionConfig {
@@ -99,12 +104,15 @@ struct ReactionConfig {
 
     double excitationMeV = 0.0;
     double qValueMeV = 0.0;
+    double neutronSeparationMeV = -1.0;  // optional cutoff for Ex
+
     std::string excitationPopulationFile;
+    std::string reactionCrossSectionFile;
 
     std::string beamTargetSRIM;
     std::string recoilTargetSRIM;
     std::string recoilDegraderSRIM;
-	std::string reactionCrossSectionFile;
+
     std::string output = "reaction_output.csv";
 };
 
@@ -113,7 +121,8 @@ struct Point {
     double y;
     double z;
 
-    Point() : x(0.0), y(0.0), z(0.0) {}
+    Point() :
+        x(0.0), y(0.0), z(0.0) {}
     Point(double xValue, double yValue, double zValue)
         : x(xValue), y(yValue), z(zValue) {}
 };
@@ -129,105 +138,175 @@ struct Vec3 {
 };
 
 struct Particle {
-    Point p;
-    Vec3 dir;
-    double E = 0.0;                    // MeV
+    double E;              // MeV
+    Point position;        // mm
+    Vec3 direction;        // unit vector
+    double thetaX;         // mrad
+    double thetaY;         // mrad
+    int    chargeState;    // exit charge state (set at end)
+
+    Particle()
+        : E(0.0), position(), direction(),
+          thetaX(0.0), thetaY(0.0), chargeState(0) {}
+};
+
+struct DegraderConfig : public Material {
+    bool enabled = false;
 };
 
 // -----------------------------------------------------------------------------
-// Small utilities for reading key=value or key:value input files
+// Utility functions
 // -----------------------------------------------------------------------------
 
-std::string trim(const std::string& s)
+std::string lower(const std::string& text)
 {
-    const std::size_t first = s.find_first_not_of(" \t\r\n");
-    const std::size_t last = s.find_last_not_of(" \t\r\n");
-
-    if (first == std::string::npos) {
-        return "";
+    std::string result = text;
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        result[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(result[i])));
     }
-    return s.substr(first, last - first + 1);
+    return result;
 }
 
-std::string removeComments(std::string s)
+std::string trim(const std::string& text)
 {
-    const std::size_t hash = s.find('#');
-    if (hash != std::string::npos) {
-        s.resize(hash);
-    }
-
-    const std::size_t semicolon = s.find(';');
-    if (semicolon != std::string::npos) {
-        s.resize(semicolon);
-    }
-
-    return trim(s);
+    std::size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return std::string();
+    std::size_t last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
 }
 
-std::string lowerCase(std::string value)
-{
-    for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return value;
-}
-
-std::string upperCase(std::string value)
-{
-    for (char& c : value) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return value;
-}
+// -----------------------------------------------------------------------------
+// Input parsing
+// -----------------------------------------------------------------------------
 
 std::map<std::string, std::string> readKeyValueFile(const std::string& filename)
 {
-    std::ifstream input(filename);
-    if (!input) throw std::runtime_error("Cannot open input file " + filename);
+    std::ifstream input(filename.c_str());
+    if (!input) {
+        throw std::runtime_error("Cannot open input file " + filename);
+    }
+
     std::map<std::string, std::string> values;
     std::string line;
-    while (std::getline(input, line)) {
-        line = removeComments(line);
-        if (line.empty()) continue;
-        std::size_t separator = line.find('=');
-        if (separator == std::string::npos) separator = line.find(':');
-        std::string key, value;
-        if (separator != std::string::npos) {
-            key = trim(line.substr(0, separator));
-            value = trim(line.substr(separator + 1));
-        } else {
-            std::istringstream stream(line);
-            stream >> key;
-            std::getline(stream, value);
-            value = trim(value);
-        }
-        if (!key.empty() && !value.empty()) values[upperCase(key)] = value;
-    }
-    return values;
-}
 
-double getDouble(const std::map<std::string, std::string>& values,
-                 const std::string& key,
-                 double defaultValue = 0.0)
-{
-    const auto it = values.find(upperCase(key));
-    return it == values.end() ? defaultValue : std::stod(it->second);
+    while (std::getline(input, line)) {
+        const std::string stripped = trim(line);
+        if (stripped.empty()) continue;
+        if (stripped[0] == '#') continue;
+
+        std::istringstream stream(stripped);
+        std::string key;
+        std::string value;
+
+        stream >> key;
+        if (key.empty()) continue;
+
+        if (stripped.find('=') != std::string::npos) {
+            std::getline(stream, value);
+            const std::size_t eqPos = value.find('=');
+            if (eqPos != std::string::npos) {
+                value = value.substr(eqPos + 1);
+            }
+        } else {
+            std::getline(stream, value);
+        }
+
+        value = trim(value);
+        values[lower(key)] = value;
+    }
+
+    return values;
 }
 
 int getInt(const std::map<std::string, std::string>& values,
            const std::string& key,
            int defaultValue = 0)
 {
-    return static_cast<int>(getDouble(values, key, defaultValue));
+    const auto it = values.find(lower(key));
+    if (it == values.end()) return defaultValue;
+    return std::atoi(it->second.c_str());
+}
+
+double getDouble(const std::map<std::string, std::string>& values,
+                 const std::string& key,
+                 double defaultValue = 0.0)
+{
+    const auto it = values.find(lower(key));
+    if (it == values.end()) return defaultValue;
+    return std::atof(it->second.c_str());
 }
 
 std::string getString(const std::map<std::string, std::string>& values,
                       const std::string& key,
-                      const std::string& defaultValue = "")
+                      const std::string& defaultValue = std::string())
 {
-    const auto it = values.find(upperCase(key));
-    return it == values.end() ? defaultValue : it->second;
+    const auto it = values.find(lower(key));
+    if (it == values.end()) return defaultValue;
+    return it->second;
 }
 
-// -----------------------------------------------------------------------------
-// Input readers
-// -----------------------------------------------------------------------------
+BeamConfig readBeam(const std::string& filename)
+{
+    const auto values = readKeyValueFile(filename);
+    BeamConfig beam;
+
+    beam.Z = getInt(values, "beam_Z");
+    beam.A = getInt(values, "beam_A");
+    beam.energyValue = getDouble(values, "beam_energy");
+    beam.energyUnit = getString(values, "beam_energy_unit", beam.energyUnit);
+
+    beam.energySpreadValue = getDouble(values, "energy_spread");
+    beam.energySpreadMode = getString(values, "energy_spread_mode",
+                                      beam.energySpreadMode);
+
+    beam.emittanceX = getDouble(values, "emittance_x_mm_mrad");
+    beam.emittanceY = getDouble(values, "emittance_y_mm_mrad");
+    beam.sigmaXmm = getDouble(values, "beam_sigma_x_mm", beam.sigmaXmm);
+    beam.sigmaYmm = getDouble(values, "beam_sigma_y_mm", beam.sigmaYmm);
+
+    beam.particles = getInt(values, "particles", beam.particles);
+    beam.stepMm = getDouble(values, "step_um", 0.1) * 0.001;
+    beam.stragglingCoefficient = getDouble(
+        values, "bohr_straggling_scale", beam.stragglingCoefficient);
+
+    beam.seed = static_cast<unsigned long long>(
+        getInt(values, "seed", static_cast<int>(beam.seed)));
+    beam.output = getString(values, "output", beam.output);
+
+    beam.rootOutput = (getInt(values, "root_output", 0) != 0);
+    beam.rootFile = getString(values, "root_file", beam.rootFile);
+
+	beam.reducedWidthW = getDouble(
+        values, "charge_state_reduced_width", 0.7);
+
+    if (beam.A <= 0 || beam.energyValue <= 0.0) {
+        throw std::runtime_error("Beam input needs BEAM_A and BEAM_ENERGY > 0");
+    }
+
+    if (beam.energyUnit == "MeV" || beam.energyUnit == "mev") {
+        beam.energyMeV = beam.energyValue;
+        beam.energySpreadMeV = beam.energySpreadValue;
+    } else {
+        beam.energyMeV = beam.energyValue * beam.A;
+        beam.energySpreadMeV = beam.energySpreadValue * beam.A;
+    }
+
+    if (beam.energySpreadMode == "sigma_percent" ||
+        beam.energySpreadMode == "fwhm_percent") {
+        const double fraction = beam.energySpreadValue / 100.0;
+        if (beam.energySpreadMode == "sigma_percent") {
+            beam.energySpreadMeV = fraction * beam.energyMeV;
+        } else {
+            beam.energySpreadMeV = fraction * beam.energyMeV /
+                (2.0 * std::sqrt(2.0 * std::log(2.0)));
+        }
+    } else if (beam.energySpreadMode == "fwhm_abs") {
+        beam.energySpreadMeV = beam.energySpreadMeV /
+            (2.0 * std::sqrt(2.0 * std::log(2.0)));
+    }
+
+    return beam;
+}
 
 Material readMaterial(const std::string& filename)
 {
@@ -236,82 +315,21 @@ Material readMaterial(const std::string& filename)
 
     material.thicknessMm = getDouble(values, "thickness_mm");
     material.density = getDouble(values, "density_g_cm3");
-    material.effectiveZ = getDouble(
-        values, "effective_Z", getDouble(values, "Z", 6.0));
-    material.effectiveA = getDouble(
-        values, "effective_A", getDouble(values, "A", 12.0));
-    material.srimFile = getString(
-        values, "stopping_table", getString(values, "srim_file"));
-    material.energyUnit = getString(values, "srim_energy_unit", "auto");
-    material.stoppingUnit = getString(
-        values, "srim_stopping_unit", "auto");
+    material.effectiveZ = getDouble(values, "effective_Z", material.effectiveZ);
+    material.effectiveA = getDouble(values, "effective_A", material.effectiveA);
+    material.srimFile = getString(values, "stopping_table");
+    material.energyUnit = getString(values, "srim_energy_unit",
+                                    material.energyUnit);
+    material.stoppingUnit = getString(values, "srim_stopping_unit",
+                                      material.stoppingUnit);
 
     if (material.thicknessMm <= 0.0 || material.density <= 0.0 ||
         material.srimFile.empty()) {
         throw std::runtime_error(
-            "Material needs thickness, density, and stopping_table in " +
-            filename);
+            "Target input needs THICKNESS_MM, DENSITY_G_CM3, and STOPPING_TABLE");
     }
 
     return material;
-}
-
-BeamConfig readBeam(const std::string& filename)
-{
-    const auto values = readKeyValueFile(filename);
-    BeamConfig beam;
-
-    beam.Z = getInt(values, "BEAM_Z");
-    beam.A = getInt(values, "BEAM_A");
-    beam.energyValue = getDouble(values, "BEAM_ENERGY");
-    beam.energyUnit = getString(values, "BEAM_ENERGY_UNIT", "MeV");
-    beam.energySpreadValue = getDouble(values, "ENERGY_SPREAD", 0.0);
-    beam.energySpreadMode = lowerCase(getString(values, "ENERGY_SPREAD_MODE", "sigma_abs"));
-    const std::string energyUnit = lowerCase(beam.energyUnit);
-    if (energyUnit == "mev") beam.energyMeV = beam.energyValue;
-    else if (energyUnit == "mev/u" || energyUnit == "mev_per_u") beam.energyMeV = beam.energyValue * beam.A;
-    else throw std::runtime_error("BEAM_ENERGY_UNIT must be MeV or MeV/u");
-    if (beam.energySpreadMode == "sigma_percent") beam.energySpreadMeV = beam.energyMeV * beam.energySpreadValue / 100.0;
-    else if (beam.energySpreadMode == "fwhm_percent") beam.energySpreadMeV = beam.energyMeV * beam.energySpreadValue / 100.0 / 2.354820045;
-    else if (beam.energySpreadMode == "sigma_abs") beam.energySpreadMeV = (energyUnit == "mev/u" || energyUnit == "mev_per_u") ? beam.energySpreadValue * beam.A : beam.energySpreadValue;
-    else if (beam.energySpreadMode == "fwhm_abs") beam.energySpreadMeV = ((energyUnit == "mev/u" || energyUnit == "mev_per_u") ? beam.energySpreadValue * beam.A : beam.energySpreadValue) / 2.354820045;
-    else throw std::runtime_error("ENERGY_SPREAD_MODE must be sigma_percent, fwhm_percent, sigma_abs, or fwhm_abs");
-
-    beam.emittanceX = getDouble(
-        values, "emittance_x_mm_mrad",
-        getDouble(values, "emittance_mm_mrad"));
-    beam.emittanceY = getDouble(values, "emittance_y_mm_mrad", beam.emittanceX);
-
-    beam.sigmaXmm = getDouble(values, "beam_sigma_x_mm", 1.0);
-    beam.sigmaYmm = getDouble(values, "beam_sigma_y_mm", beam.sigmaXmm);
-    beam.particles = getInt(values, "particles", 10000);
-    // STEP_UM is the preferred input. Keep STEP_MM for backward compatibility.
-    if (values.find("STEP_UM") != values.end()) {
-        beam.stepMm = getDouble(values, "STEP_UM") * 1.0e-3;
-    } else {
-        beam.stepMm = getDouble(values, "STEP_MM", 0.0001);
-    }
-    beam.seed = static_cast<unsigned long long>(getDouble(values, "seed", 0));
-    beam.stragglingCoefficient = getDouble(
-        values, "straggling_coefficient", 0.02);
-    beam.output = getString(values, "output", beam.output);
-    beam.rootOutput = getInt(values, "ROOT_OUTPUT", 0) != 0;
-    beam.rootFile = getString(values, "ROOT_FILE", beam.rootFile);
-
-    if (beam.Z <= 0 || beam.A <= 0 || beam.energyMeV <= 0.0) {
-        throw std::runtime_error("Invalid beam input");
-    }
-
-    if (beam.sigmaXmm <= 0.0 || beam.sigmaYmm <= 0.0 ||
-        beam.stepMm <= 0.0 || beam.particles <= 0) {
-        throw std::runtime_error("Invalid beam width, step size, or particle count");
-    }
-
-    if (beam.seed == 0) {
-        beam.seed = std::random_device()();
-    }
-
-    return beam;
 }
 
 DegraderConfig readDegrader(const std::string& filename)
@@ -319,24 +337,22 @@ DegraderConfig readDegrader(const std::string& filename)
     const auto values = readKeyValueFile(filename);
     DegraderConfig degrader;
 
-    degrader.enabled = getInt(values, "enabled") != 0;
-    if (!degrader.enabled) {
-        return degrader;
-    }
+    degrader.enabled = (getInt(values, "enabled", 0) != 0);
+    degrader.thicknessMm = getDouble(values, "thickness_mm", degrader.thicknessMm);
+    degrader.density = getDouble(values, "density_g_cm3", degrader.density);
+    degrader.effectiveZ = getDouble(values, "effective_Z", degrader.effectiveZ);
+    degrader.effectiveA = getDouble(values, "effective_A", degrader.effectiveA);
+    degrader.srimFile = getString(values, "stopping_table", degrader.srimFile);
+    degrader.energyUnit = getString(values, "srim_energy_unit", degrader.energyUnit);
+    degrader.stoppingUnit = getString(values, "srim_stopping_unit",
+                                      degrader.stoppingUnit);
 
-    degrader.thicknessMm = getDouble(values, "thickness_mm");
-    degrader.density = getDouble(values, "density_g_cm3");
-    degrader.effectiveZ = getDouble(values, "effective_Z", 6.0);
-    degrader.effectiveA = getDouble(values, "effective_A", 12.0);
-    degrader.srimFile = getString(values, "stopping_table");
-    degrader.energyUnit = getString(values, "srim_energy_unit", "auto");
-    degrader.stoppingUnit = getString(
-        values, "srim_stopping_unit", "auto");
-
-    if (degrader.thicknessMm <= 0.0 || degrader.density <= 0.0 ||
-        degrader.srimFile.empty()) {
-        throw std::runtime_error(
-            "Enabled degrader needs thickness, density, and stopping_table");
+    if (degrader.enabled) {
+        if (degrader.thicknessMm <= 0.0 || degrader.density <= 0.0 ||
+            degrader.srimFile.empty()) {
+            throw std::runtime_error(
+                "Degrader input needs THICKNESS_MM, DENSITY_G_CM3, and STOPPING_TABLE when ENABLED != 0");
+        }
     }
 
     return degrader;
@@ -358,13 +374,17 @@ ReactionConfig readReaction(const std::string& filename)
 
     reaction.excitationMeV = getDouble(values, "recoil_excitation_MeV");
     reaction.qValueMeV = getDouble(values, "q_value_MeV");
-    reaction.excitationPopulationFile = getString(values, "recoil_excitation_population_file");
+    reaction.neutronSeparationMeV = getDouble(
+        values, "recoil_neutron_separation_mev", -1.0);
 
     reaction.beamTargetSRIM = getString(values, "beam_srim_target");
     reaction.recoilTargetSRIM = getString(values, "recoil_srim_target");
     reaction.recoilDegraderSRIM = getString(values, "recoil_srim_degrader");
 
-	reaction.reactionCrossSectionFile = getString(values, "reaction_cross_section_file");
+    reaction.excitationPopulationFile = getString(
+        values, "recoil_excitation_population_file");
+    reaction.reactionCrossSectionFile = getString(
+        values, "reaction_cross_section_file");
 
     reaction.output = getString(values, "output", reaction.output);
 
@@ -383,176 +403,278 @@ ReactionConfig readReaction(const std::string& filename)
 // SRIM table handling
 // -----------------------------------------------------------------------------
 
-struct StoppingTable {
-    std::vector<double> energyMeV;
-    std::vector<double> stoppingPower;
+struct SRIMEntry {
+    double energyMeV;
+    double stoppingMeVPerMm;
 };
 
-double energyToMeV(double value, const std::string& unit)
-{
-    const std::string u = lowerCase(unit);
-    if (u == "ev") return value / 1.0e6;
-    if (u == "kev") return value / 1.0e3;
-    if (u == "mev") return value;
-    if (u == "gev") return value * 1.0e3;
-    throw std::runtime_error("Unsupported SRIM energy unit: " + unit);
-}
+struct SRIMTable {
+    std::vector<SRIMEntry> entries;
+};
 
-double stoppingToMeVPerMm(double value, const std::string& unit,
-                          double density)
+SRIMTable readSRIMTable(const Material& material)
 {
-    const std::string u = lowerCase(unit);
-    // Return linear stopping power in MeV/mm.
-    if (u == "ev / angstrom" || u == "ev/angstrom") return value * 10.0;
-    if (u == "kev / micron" || u == "kev/micron") return value;
-    if (u == "mev / mm" || u == "mev/mm") return value;
-    if (u == "mev / cm" || u == "mev/cm") return value / 10.0;
-    if (u == "mev / (mg/cm2)" || u == "mev/(mg/cm2)") {
-        return value * density / 10.0 * 1000.0;
+    std::ifstream input(material.srimFile.c_str());
+    if (!input) {
+        throw std::runtime_error("Cannot open SRIM stopping table " + material.srimFile);
     }
-    if (u == "mev / (g/cm2)" || u == "mev/(g/cm2)" ||
-        u == "mev_cm2_g") {
-        return value * density / 10.0;
-    }
-    if (u == "kev / (mg/cm2)" || u == "kev/(mg/cm2)") {
-        return value * density / 10.0;
-    }
-    if (u == "kev / (ug/cm2)" || u == "kev/(ug/cm2)") {
-        return value * density / 10.0 * 1000.0;
-    }
-    throw std::runtime_error("Unsupported SRIM stopping unit: " + unit);
-}
 
-StoppingTable loadSRIMTable(const std::string& filename,
-                            const std::string& requestedEnergyUnit,
-                            const std::string& requestedStoppingUnit,
-                            double density)
-{
-    std::ifstream input(filename);
-    if (!input) throw std::runtime_error("Cannot open SRIM file " + filename);
-
-    StoppingTable table;
     std::string line;
-    std::string energyUnit = requestedEnergyUnit;
-    std::string stoppingUnit = requestedStoppingUnit;
     bool inTable = false;
 
+    std::vector<double> energies;
+    std::vector<double> totalStopping;
+
     while (std::getline(input, line)) {
-        const std::string lower = lowerCase(line);
-        const std::size_t stoppingPos = lower.find("stopping units");
-        if (stoppingPos != std::string::npos) {
-            const std::size_t equals = line.find('=', stoppingPos);
-            if (equals != std::string::npos) {
-                stoppingUnit = trim(line.substr(equals + 1));
+        std::string stripped = trim(line);
+        if (stripped.empty()) continue;
+
+        if (!inTable) {
+            // Accept both "Ion Energy ..." and "Ion dE/dx ..." header styles.
+            if (stripped.find("Ion")    != std::string::npos &&
+                (stripped.find("Energy") != std::string::npos ||
+                 stripped.find("dE/dx")  != std::string::npos)) {
+                inTable = true;
+            }
+            continue;
+        }
+
+        // Interpret data rows of the form:
+        //   10.00 keV   4.323E+01  7.385E+02 ...
+        std::istringstream stream(stripped);
+
+        double energy = 0.0;
+        if (!(stream >> energy)) {
+            continue;
+        }
+
+        std::string token;
+        if (!(stream >> token)) {
+            continue;
+        }
+
+        double energyKeV = 0.0;
+        double elec = 0.0;
+        double nucl = 0.0;
+
+        try {
+            // Numeric token: actually electronic stopping; energy already keV.
+            elec = std::stod(token);
+            energyKeV = energy;
+            if (!(stream >> nucl)) {
+                continue;
+            }
+        } catch (const std::exception&) {
+            const std::string unit = lower(token);
+            double scaleToKeV = 1.0;
+
+            if (unit.find("kev") != std::string::npos) {
+                scaleToKeV = 1.0;
+            } else if (unit.find("mev") != std::string::npos) {
+                scaleToKeV = 1.0e3;
+            } else if (unit.find("gev") != std::string::npos) {
+                scaleToKeV = 1.0e6;
+            } else {
+                scaleToKeV = 1.0;
+            }
+
+            energyKeV = energy * scaleToKeV;
+
+            if (!(stream >> elec >> nucl)) {
+                continue;
             }
         }
-        // Native SRIM files use either "Ion Energy ..." or
-        // "Ion dE/dx dE/dx ...".  The latter is the format used by
-        // SRIM-2013 output files such as "Strontium_in_SiHe.txt".
-        const std::size_t firstStopping = lower.find("de/dx");
-        const std::size_t secondStopping =
-            (firstStopping == std::string::npos)
-                ? std::string::npos
-                : lower.find("de/dx", firstStopping + 5);
-        if (lower.find("ion") != std::string::npos &&
-            firstStopping != std::string::npos &&
-            secondStopping != std::string::npos) {
-            inTable = true;
-            continue;
-        }
-        if (!inTable) continue;
 
-        // SRIM rows have: energy [unit], electronic, nuclear, then ranges.
-        std::istringstream stream(line);
-        double energy = 0.0, electronic = 0.0, nuclear = 0.0;
-        std::string energyUnitInRow;
-        if (!(stream >> energy >> energyUnitInRow >> electronic >> nuclear)) {
-            continue;
-        }
-        if (energy <= 0.0 || electronic < 0.0 || nuclear < 0.0) continue;
-
-        if (requestedEnergyUnit == "auto" || requestedEnergyUnit.empty()) {
-            energyUnit = energyUnitInRow;
-        }
-        const double energyMeV = energyToMeV(energy, energyUnit);
-        // Required total SRIM stopping is electronic + nuclear.
-        const double total = electronic + nuclear;
-        const double stoppingMeVPerMm = stoppingToMeVPerMm(
-            total, stoppingUnit, density);
-        table.energyMeV.push_back(energyMeV);
-        table.stoppingPower.push_back(stoppingMeVPerMm);
+        energies.push_back(energyKeV);
+        totalStopping.push_back(elec + nucl);
     }
 
-    if (table.energyMeV.size() < 2) {
-        throw std::runtime_error("No usable SRIM table rows in " + filename);
+    if (energies.empty()) {
+        throw std::runtime_error(
+            "No data rows found in SRIM table " + material.srimFile);
     }
 
-    std::vector<std::size_t> order(table.energyMeV.size());
-    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        return table.energyMeV[a] < table.energyMeV[b];
-    });
+    double energyScale = 1.0;
+    double stoppingScale = 1.0;
 
-    StoppingTable sorted;
-    for (const std::size_t index : order) {
-        if (sorted.energyMeV.empty() ||
-            table.energyMeV[index] > sorted.energyMeV.back()) {
-            sorted.energyMeV.push_back(table.energyMeV[index]);
-            sorted.stoppingPower.push_back(table.stoppingPower[index]);
-        }
-    }
-    return sorted;
-}
+    const std::string energyUnit = lower(material.energyUnit);
+    const std::string stoppingUnit = lower(material.stoppingUnit);
 
-double interpolateStoppingPower(const StoppingTable& table, double energyMeV)
-{
-    if (energyMeV <= table.energyMeV.front()) {
-        return table.stoppingPower.front();
-    }
-    if (energyMeV >= table.energyMeV.back()) {
-        return table.stoppingPower.back();
+    if (energyUnit == "auto" || energyUnit.empty() ||
+        energyUnit == "kev") {
+        energyScale = 0.001;  // keV -> MeV
+    } else if (energyUnit == "mev") {
+        energyScale = 1.0;
+    } else {
+        throw std::runtime_error(
+            "Unsupported SRIM energy unit: " + material.energyUnit);
     }
 
-    const auto upper = std::upper_bound(
-        table.energyMeV.begin(), table.energyMeV.end(), energyMeV);
-    const std::size_t i = static_cast<std::size_t>(
-        upper - table.energyMeV.begin() - 1);
+    if (stoppingUnit == "auto" || stoppingUnit.empty() ||
+        stoppingUnit == "kev/micron") {
+        stoppingScale = 0.001; // keV/micron -> MeV/micron
+    } else if (stoppingUnit == "mev/micron") {
+        stoppingScale = 1.0;
+    } else if (stoppingUnit == "mev/mm") {
+        stoppingScale = 1.0 / 1000.0;
+    } else {
+        throw std::runtime_error(
+            "Unsupported SRIM stopping unit: " + material.stoppingUnit);
+    }
 
-    const double fraction =
-        (energyMeV - table.energyMeV[i]) /
-        (table.energyMeV[i + 1] - table.energyMeV[i]);
+    SRIMTable table;
+    const double micronToMm = 0.001;
 
-    return table.stoppingPower[i] + fraction *
-        (table.stoppingPower[i + 1] - table.stoppingPower[i]);
+    for (std::size_t i = 0; i < energies.size(); ++i) {
+        SRIMEntry entry;
+        entry.energyMeV = energies[i] * energyScale;
+        const double stoppingMeVPerMicron = totalStopping[i] * stoppingScale;
+        entry.stoppingMeVPerMm = stoppingMeVPerMicron / micronToMm;
+        table.entries.push_back(entry);
+    }
+
+    return table;
 }
 
 struct TransportModel {
+    SRIMTable table;
     Material material;
-    StoppingTable table;
-    double radiationLength = 1.0e30;  // g/cm^2, approximate
 };
-
-double approximateRadiationLength(double Z, double A)
-{
-    return 716.4 * A /
-        (Z * (Z + 1.0) * std::log(287.0 / std::sqrt(Z)));
-}
 
 TransportModel buildTransportModel(const Material& material)
 {
     TransportModel model;
+    model.table = readSRIMTable(material);
     model.material = material;
-    model.table = loadSRIMTable(material.srimFile, material.energyUnit,
-                                material.stoppingUnit, material.density);
-    model.radiationLength = approximateRadiationLength(
-        material.effectiveZ, material.effectiveA);
     return model;
 }
 
-// The SRIM loader stores total linear stopping power directly in MeV/mm.
+double interpolateStoppingPower(const SRIMTable& table, double energyMeV)
+{
+    if (table.entries.empty()) return 0.0;
+
+    if (energyMeV <= table.entries.front().energyMeV) {
+        return table.entries.front().stoppingMeVPerMm;
+    }
+
+    if (energyMeV >= table.entries.back().energyMeV) {
+        return table.entries.back().stoppingMeVPerMm;
+    }
+
+    std::size_t upperIndex = 1;
+    while (upperIndex < table.entries.size() &&
+           table.entries[upperIndex].energyMeV < energyMeV) {
+        ++upperIndex;
+    }
+
+    if (upperIndex >= table.entries.size()) {
+        return table.entries.back().stoppingMeVPerMm;
+    }
+
+    const std::size_t lowerIndex = upperIndex - 1;
+    const double e1 = table.entries[lowerIndex].energyMeV;
+    const double e2 = table.entries[upperIndex].energyMeV;
+    const double s1 = table.entries[lowerIndex].stoppingMeVPerMm;
+    const double s2 = table.entries[upperIndex].stoppingMeVPerMm;
+
+    if (e2 <= e1) return s1;
+
+    const double t = (energyMeV - e1) / (e2 - e1);
+    return s1 + t * (s2 - s1);
+}
+
 double energyLossPerMillimetre(const TransportModel& model, double energyMeV)
 {
     return interpolateStoppingPower(model.table, std::max(energyMeV, 1.0e-9));
+}
+
+// -----------------------------------------------------------------------------
+// Reaction depth distribution using TALYS σ(E)
+// -----------------------------------------------------------------------------
+
+struct ReactionDepthDistribution {
+    std::vector<double> depthsMm;
+    std::vector<double> cdf;
+    double totalWeight = 0.0;
+
+    bool empty() const {
+        return depthsMm.empty() || totalWeight <= 0.0;
+    }
+
+    double sample(std::mt19937_64& random,
+                  const Material& target,
+                  double stepMm) const
+    {
+        if (empty()) {
+            double u = std::generate_canonical<double, 64>(random);
+            double depth = target.thicknessMm * u;
+            depth = std::max(
+                std::min(depth, target.thicknessMm),
+                std::min(stepMm, target.thicknessMm));
+            return depth;
+        }
+
+        std::uniform_real_distribution<double> uni(0.0, totalWeight);
+        double u = uni(random);
+
+        auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
+        std::size_t idx = static_cast<std::size_t>(it - cdf.begin());
+        if (idx >= depthsMm.size()) {
+            idx = depthsMm.size() - 1;
+        }
+
+        double depth = depthsMm[idx];
+        depth = std::max(
+            std::min(depth, target.thicknessMm),
+            std::min(stepMm, target.thicknessMm));
+        return depth;
+    }
+};
+
+ReactionDepthDistribution buildReactionDepthDistribution(
+    const BeamConfig& beam,
+    const Material& target,
+    const TransportModel& targetModel,
+    const BeamMC::ReactionCrossSection& xs,
+    const ReactionConfig& reaction)
+{
+    ReactionDepthDistribution dist;
+
+    if (xs.empty() || target.thicknessMm <= 0.0) {
+        return dist;
+    }
+
+    const double dz = beam.stepMm;
+    double depthMm = 0.0;
+    double energyMeV = beam.energyMeV;
+
+    double totalWeight = 0.0;
+
+    while (depthMm < target.thicknessMm && energyMeV > 0.0) {
+        const double step = std::min(dz, target.thicknessMm - depthMm);
+
+        // Map inverse-kinematics beam energy to equivalent projectile lab energy
+        // for the direct TALYS calculation: E_proj,lab = E_beam,lab * (A_target/A_beam).
+        const double projectileEnergyMeV =
+            energyMeV * static_cast<double>(reaction.targetA) /
+            static_cast<double>(reaction.beamA);
+        const double sigmaMb = std::max(0.0, xs.evaluate(projectileEnergyMeV));
+        const double weight = sigmaMb * step;
+
+        if (weight > 0.0) {
+            totalWeight += weight;
+            dist.depthsMm.push_back(depthMm + 0.5 * step);
+            dist.cdf.push_back(totalWeight);
+        }
+
+        const double dE =
+            energyLossPerMillimetre(targetModel, energyMeV) * step;
+        energyMeV = std::max(0.0, energyMeV - dE);
+        depthMm += step;
+    }
+
+    dist.totalWeight = totalWeight;
+    return dist;
 }
 
 // -----------------------------------------------------------------------------
@@ -574,221 +696,353 @@ Vec3 unitVector(const Vec3& vector)
         vector.z / magnitude);
 }
 
-Vec3 add(const Vec3& a, const Vec3& b)
+Point propagatePosition(const Point& position,
+                        const Vec3& direction,
+                        double distanceMm)
 {
-    return Vec3(a.x + b.x, a.y + b.y, a.z + b.z);
+    Point newPosition;
+    newPosition.x = position.x + direction.x * distanceMm;
+    newPosition.y = position.y + direction.y * distanceMm;
+    newPosition.z = position.z + direction.z * distanceMm;
+    return newPosition;
 }
 
-Vec3 scale(const Vec3& vector, double factor)
+double horizontalAngle(const Vec3& direction)
 {
-    return Vec3(factor * vector.x, factor * vector.y, factor * vector.z);
+    return std::atan2(direction.x, direction.z) * 1000.0;
 }
 
-// Distance to the target surface reached by a particle emitted at depth.
-double pathToTargetSurface(double depthMm,
-                           double targetThicknessMm,
-                           const Vec3& direction)
+double verticalAngle(const Vec3& direction)
 {
-    if (direction.z > 1.0e-9) {
-        return (targetThicknessMm - depthMm) / direction.z;
-    }
-    if (direction.z < -1.0e-9) {
-        return depthMm / (-direction.z);
-    }
-
-    // A direction parallel to the target faces does not leave through a face.
-    return 1.0e30;
+    return std::atan2(direction.y, direction.z) * 1000.0;
 }
 
 // -----------------------------------------------------------------------------
-// Particle generation and transport
+// Beam generation and transport
 // -----------------------------------------------------------------------------
 
 Particle generateInitialBeamParticle(const BeamConfig& beam,
                                      std::mt19937_64& random)
 {
-    std::normal_distribution<double> gaussian(0.0, 1.0);
     Particle particle;
 
-    particle.p = Point(
-        beam.sigmaXmm * gaussian(random),
-        beam.sigmaYmm * gaussian(random),
-        0.0);
+    if (beam.energySpreadMeV > 0.0) {
+        std::normal_distribution<double> gauss(
+            beam.energyMeV, beam.energySpreadMeV);
+        particle.E = std::max(0.0, gauss(random));
+    } else {
+        particle.E = beam.energyMeV;
+    }
 
-    // For a Gaussian beam, the approximate angular rms width is emittance / sigma.
-    particle.dir = unitVector(Vec3(
-        beam.emittanceX / beam.sigmaXmm / 1000.0 * gaussian(random),
-        beam.emittanceY / beam.sigmaYmm / 1000.0 * gaussian(random),
-        1.0));
+    particle.position = Point(0.0, 0.0, 0.0);
+    particle.direction = Vec3(0.0, 0.0, 1.0);
 
-    particle.E = std::max(
-        0.0, beam.energyMeV + beam.energySpreadMeV * gaussian(random));
+    particle.thetaX = 0.0;
+    particle.thetaY = 0.0;
 
     return particle;
 }
 
+typedef void (*EnergyDepthRecorder)(double depthMm, double energyMeV);
+
 void propagate(Particle& particle,
                const TransportModel& model,
-               double lengthMm,
+               double distanceMm,
                double stepMm,
-               double charge,
-               double massNumber,
+               int Z,
+               int A,
                double stragglingCoefficient,
-               std::mt19937_64& random)
+               std::mt19937_64& random,
+               EnergyDepthRecorder recorder = nullptr)
 {
-    if (lengthMm <= 0.0 || particle.E <= 0.0) {
-        return;
-    }
+    const Material& material = model.material;
+    const double density = material.density;
 
-    // Bohr straggling:
-    //
-    //   Omega_B^2 = 0.153537 * z^2 * (Z/A) * x
-    //
-    // Omega_B is the RMS energy-loss fluctuation in MeV, z is the projectile
-    // charge, Z/A is the effective target ratio, and x is the step areal
-    // density in g/cm^2. The SRIM table supplies the mean dE/dx.
-    //
-    // STRAGGLING_COEFFICIENT is retained as a dimensionless multiplier on
-    // Omega_B^2. Set it to 1.0 for the unscaled Bohr model; 0.01 gives one
-    // percent of the Bohr variance.
+    double remainingDistance = distanceMm;
 
-    std::normal_distribution<double> gaussian(0.0, 1.0);
-    double remainingMm = lengthMm;
-    const double projectileMassMeV =
-        std::max(1.0, massNumber) * AMU_MEV;
+    std::normal_distribution<double> gauss(0.0, 1.0);
 
-    while (remainingMm > 1.0e-12 && particle.E > 1.0e-9) {
-        const double distanceMm = std::min(stepMm, remainingMm);
-        const double energyBeforeStep = particle.E;
+    while (remainingDistance > 0.0 && particle.E > 0.0) {
+        const double step = std::min(remainingDistance, stepMm);
 
-        const double meanLoss = std::min(
-            energyBeforeStep,
-            std::max(0.0,
-                energyLossPerMillimetre(model, energyBeforeStep) *
-                distanceMm));
+        const double dEdxMeVPerMm = energyLossPerMillimetre(model, particle.E);
+        const double meanLoss = dEdxMeVPerMm * step;
 
-        // Convert path length from mm to areal density in g/cm^2:
-        // density [g/cm^3] * distance [cm] = density * distance_mm / 10.
-        const double arealDensity =
-            model.material.density * distanceMm / 10.0;
-        const double targetZOverA =
-            model.material.effectiveZ /
-            std::max(model.material.effectiveA, 1.0e-12);
+        double variance = 0.0;
+        if (stragglingCoefficient > 0.0) {
+            const double arealDensity = density * step * 0.1; // g/cm^2
+            const double Zt = material.effectiveZ;
+            const double At = material.effectiveA;
 
-        const double bohrVariance =
-            std::max(0.0, stragglingCoefficient) *
-            0.153537 *
-            charge * charge *
-            targetZOverA *
-            arealDensity;
+            const double K = 0.307075;
+            const double z = static_cast<double>(Z);
+            const double variancePerPath =
+                4.0 * PI * K * z * z * arealDensity * Zt / At;
 
-        const double sampledEnergy =
-            energyBeforeStep -
-            meanLoss +
-            std::sqrt(std::max(0.0, bohrVariance)) *
-            gaussian(random);
+            variance = stragglingCoefficient * variancePerPath;
+        }
 
-        // Passive matter cannot increase the particle energy. This clamp also
-        // prevents a positive Gaussian tail from producing E > E_before.
-        particle.E = std::max(
-            0.0,
-            std::min(energyBeforeStep, sampledEnergy));
+        double loss = meanLoss;
+        if (variance > 0.0) {
+            const double sigma = std::sqrt(variance);
+            loss += sigma * gauss(random);
+        }
 
-        particle.p.x += particle.dir.x * distanceMm;
-        particle.p.y += particle.dir.y * distanceMm;
-        particle.p.z += particle.dir.z * distanceMm;
+        loss = std::max(loss, 0.0);
+        loss = std::min(loss, particle.E);
 
-        // Approximate multiple scattering using a Highland-like expression.
-        const double beta = std::max(
-            1.0e-5,
-            std::sqrt(2.0 * particle.E / projectileMassMeV));
-        const double momentumMeV = std::max(
-            1.0e-5,
-            std::sqrt(2.0 * projectileMassMeV * particle.E));
-        const double theta = 13.6 * charge / (beta * momentumMeV) *
-            std::sqrt(std::max(
-                0.0,
-                arealDensity / model.radiationLength));
+        particle.E -= loss;
+        particle.position = propagatePosition(
+            particle.position, particle.direction, step);
 
-        particle.dir = unitVector(Vec3(
-            particle.dir.x + theta * gaussian(random) / std::sqrt(2.0),
-            particle.dir.y + theta * gaussian(random) / std::sqrt(2.0),
-            particle.dir.z));
+        if (recorder) {
+            recorder(particle.position.z, particle.E);
+        }
 
-        remainingMm -= distanceMm;
+        const double radiationLengthMm = 1000.0;
+        const double t = step / radiationLengthMm;
+        const double theta0 =
+            13.6 * std::sqrt(t) * (1.0 + 0.038 * std::log(t));
+
+        const double thetaXrad = theta0 * gauss(random) / 1000.0;
+        const double thetaYrad = theta0 * gauss(random) / 1000.0;
+
+        const double cosX = std::cos(thetaXrad);
+        const double sinX = std::sin(thetaXrad);
+        const double cosY = std::cos(thetaYrad);
+        const double sinY = std::sin(thetaYrad);
+
+        Vec3 direction = particle.direction;
+
+        double dx = direction.x * cosX + direction.z * sinX;
+        double dz = -direction.x * sinX + direction.z * cosX;
+        direction.x = dx;
+        direction.z = dz;
+
+        double dy = direction.y * cosY + direction.z * sinY;
+        dz = -direction.y * sinY + direction.z * cosY;
+        direction.y = dy;
+        direction.z = dz;
+
+        particle.direction = unitVector(direction);
+        particle.thetaX = horizontalAngle(particle.direction);
+        particle.thetaY = verticalAngle(particle.direction);
+
+        remainingDistance -= step;
     }
 }
 
 // -----------------------------------------------------------------------------
-// Two-body reaction kinematics
+// Reaction generation
 // -----------------------------------------------------------------------------
 
-Particle generateRecoil(const Particle& incoming,
+Particle generateRecoil(const Particle& beamParticle,
                         const ReactionConfig& reaction,
                         std::mt19937_64& random,
                         const BeamMC::ExcitationPopulation* population)
 {
-    const double cosTheta =
-        2.0 * std::generate_canonical<double, 64>(random) - 1.0;
-    const double theta = std::acos(cosTheta);
-    const double phi = 2.0 * PI *
-        std::generate_canonical<double, 64>(random);
+    const int beamZ = reaction.beamZ;
+    const int beamA = reaction.beamA;
+    const int targetZ = reaction.targetZ;
+    const int targetA = reaction.targetA;
+    const int ejectileZ = reaction.ejectileZ;
+    const int ejectileA = reaction.ejectileA;
+    const int recoilZ = reaction.recoilZ;
+    const int recoilA = reaction.recoilA;
 
-    const double excitationMeV = population != 0
-        ? population->sample(random)
-        : reaction.excitationMeV;
+    double excitationMeV = reaction.excitationMeV;
+    if (population && !population->empty()) {
+        excitationMeV = population->sample(random);
+    }
+
+    const double qValueMeV = reaction.qValueMeV;
 
     BeamMC::TwoBodyKinematics kinematics(
-        reaction.beamZ, reaction.beamA,
-        reaction.targetZ, reaction.targetA,
-        reaction.ejectileZ, reaction.ejectileA,
-        reaction.recoilZ, reaction.recoilA,
-        reaction.qValueMeV, excitationMeV);
+        beamZ, beamA,
+        targetZ, targetA,
+        ejectileZ, ejectileA,
+        recoilZ, recoilA,
+        qValueMeV,
+        excitationMeV);
 
-    const BeamMC::KinematicsVector beamDirection(
-        incoming.dir.x, incoming.dir.y, incoming.dir.z);
-    kinematics.calculate(incoming.E, theta, phi, beamDirection);
+    std::uniform_real_distribution<double> uniform01(0.0, 1.0);
+    const double cosThetaCM = 2.0 * uniform01(random) - 1.0;
+    const double thetaCM = std::acos(cosThetaCM);
+    const double phiCM = 2.0 * PI * uniform01(random);
 
-    const BeamMC::KinematicsVector& direction =
-        kinematics.getRecoilDirection();
+    const Vec3 beamDirection = beamParticle.direction;
+    BeamMC::KinematicsVector beamUnit(
+        beamDirection.x, beamDirection.y, beamDirection.z);
+
+    kinematics.calculate(
+        beamParticle.E,
+        thetaCM,
+        phiCM,
+        beamUnit);
+
+    const BeamMC::KinematicsResult& result = kinematics.getResult();
 
     Particle recoil;
-    recoil.p = incoming.p;
-    recoil.dir = Vec3(direction.x, direction.y, direction.z);
-    recoil.E = kinematics.getRecoilEnergyMeV();
+    recoil.E = result.recoilEnergyMeV;
+    recoil.position = beamParticle.position;
+    recoil.direction = Vec3(
+        result.recoilDirection.x,
+        result.recoilDirection.y,
+        result.recoilDirection.z);
+    recoil.thetaX = result.recoilHorizontalAngleRad * 1000.0;
+    recoil.thetaY = result.recoilVerticalAngleRad * 1000.0;
+
     return recoil;
 }
 
-#ifdef BEAMMC_WITH_ROOT
-struct RootWriter {
-    TFile file;
-    TH1D hEnergy;
-    TH2D hAngles;
-    TTree tree;
-    double incidentEnergy, incidentThetaX, incidentThetaY;
-    double outgoingEnergy, outgoingThetaX, outgoingThetaY;
-    RootWriter(const std::string& name, const std::string& mode)
-        : file(name.c_str(), "RECREATE"),
-          hEnergy("hOutgoingEnergy", "Outgoing energy;Energy (MeV);Counts", 4000, 0, 400),
-          hAngles("hOutgoingAngles", "Outgoing angles;Horizontal angle (mrad);Vertical angle (mrad)", 400, -200, 200, 400, -200, 200),
-          tree("particles", "Incident and outgoing particle variables") {
-        tree.Branch("incident_energy_MeV", &incidentEnergy, "incident_energy_MeV/D");
-        tree.Branch("incident_theta_x_mrad", &incidentThetaX, "incident_theta_x_mrad/D");
-        tree.Branch("incident_theta_y_mrad", &incidentThetaY, "incident_theta_y_mrad/D");
-        tree.Branch("outgoing_energy_MeV", &outgoingEnergy, "outgoing_energy_MeV/D");
-        tree.Branch("outgoing_theta_x_mrad", &outgoingThetaX, "outgoing_theta_x_mrad/D");
-        tree.Branch("outgoing_theta_y_mrad", &outgoingThetaY, "outgoing_theta_y_mrad/D");
-    }
-    void fill(const Particle& in, const Particle& out) {
-        incidentEnergy=in.E; incidentThetaX=std::atan2(in.dir.x,in.dir.z)*1000.0; incidentThetaY=std::atan2(in.dir.y,in.dir.z)*1000.0;
-        outgoingEnergy=out.E; outgoingThetaX=std::atan2(out.dir.x,out.dir.z)*1000.0; outgoingThetaY=std::atan2(out.dir.y,out.dir.z)*1000.0;
-        hEnergy.Fill(outgoingEnergy); hAngles.Fill(outgoingThetaX,outgoingThetaY); tree.Fill();
-    }
-    ~RootWriter() { file.cd(); hEnergy.Write(); hAngles.Write(); tree.Write(); file.Close(); }
-};
-#endif
+// -----------------------------------------------------------------------------
+// ROOT output helper
+// -----------------------------------------------------------------------------
 
-} // namespace
+#ifdef BEAMMC_WITH_ROOT
+
+struct RootWriter {
+    TFile* file;
+    TH1D* hEnergy;
+    TH2D* hAngles;
+    TH1D* hExitCharge;
+
+    TH1D* hReactionDepth;        // 1D: reaction depth in target
+    TH2D* hBeamEnergyVsDepth;    // 2D: beam energy vs depth
+    TH2D* hRecoilEnergyVsDepth;  // 2D: recoil energy vs depth
+
+    TTree* tree;
+
+    double incidentEnergy;
+    double incidentThetaX;
+    double incidentThetaY;
+    double recoilEnergy;
+    double recoilThetaX;
+    double recoilThetaY;
+    double exitCharge;
+
+    RootWriter(const std::string& filename,
+               double targetThicknessMm,
+               bool degraderEnabled,
+               double degraderThicknessMm,
+               double maxBeamEnergyMeV,
+               double beamStepMm)
+    {
+        const double totalThicknessMm =
+            targetThicknessMm +
+            (degraderEnabled ? degraderThicknessMm : 0.0);
+
+        int nDepthBins = std::max(
+            1,
+            static_cast<int>(std::ceil(totalThicknessMm / beamStepMm)));
+
+        file = new TFile(filename.c_str(), "RECREATE");
+
+        hEnergy = new TH1D(
+            "hEnergy",
+            "Recoil energy;E_{recoil} [MeV];Counts",
+            400, 0.0, maxBeamEnergyMeV);
+
+        hAngles = new TH2D(
+            "hAngles",
+            "Recoil angles;theta_{x} [mrad];theta_{y} [mrad]",
+            400, -200.0, 200.0,
+            400, -200.0, 200.0);
+
+        hReactionDepth = new TH1D(
+            "hReactionDepth",
+            "Reaction depth in target;depth [mm];Counts",
+            nDepthBins, 0.0, targetThicknessMm);
+
+        hBeamEnergyVsDepth = new TH2D(
+            "hBeamEnergyVsDepth",
+            "Beam energy vs depth;depth [mm];E_{beam} [MeV]",
+            nDepthBins, 0.0, totalThicknessMm,
+            400, 0.0, maxBeamEnergyMeV * 1.1);
+
+        hRecoilEnergyVsDepth = new TH2D(
+            "hRecoilEnergyVsDepth",
+            "Recoil energy vs depth;depth [mm];E_{recoil} [MeV]",
+            nDepthBins, 0.0, totalThicknessMm,
+            400, 0.0, maxBeamEnergyMeV * 1.1);
+
+        hExitCharge = new TH1D(
+            "hExitCharge",
+            "Exit charge state;q;Counts",
+            100, -0.5, 99.5);
+
+        tree = new TTree("BeamMC", "BeamMC output");
+
+        tree->Branch("incidentEnergy",  &incidentEnergy, "incidentEnergy/D");
+        tree->Branch("incidentThetaX",  &incidentThetaX, "incidentThetaX/D");
+        tree->Branch("incidentThetaY",  &incidentThetaY, "incidentThetaY/D");
+        tree->Branch("recoilEnergy",    &recoilEnergy,   "recoilEnergy/D");
+        tree->Branch("recoilThetaX",    &recoilThetaX,   "recoilThetaX/D");
+        tree->Branch("recoilThetaY",    &recoilThetaY,   "recoilThetaY/D");
+        tree->Branch("exitCharge",      &exitCharge,     "exitCharge/D");
+    }
+
+    ~RootWriter()
+    {
+        if (file) {
+            file->cd();
+            if (hEnergy)             hEnergy->Write();
+            if (hAngles)            hAngles->Write();
+            if (hReactionDepth)     hReactionDepth->Write();
+            if (hBeamEnergyVsDepth) hBeamEnergyVsDepth->Write();
+            if (hRecoilEnergyVsDepth) hRecoilEnergyVsDepth->Write();
+            if (hExitCharge)        hExitCharge->Write();
+            if (tree)               tree->Write();
+            file->Close();
+        }
+    }
+
+    void fill(const Particle& incident,
+              const Particle& recoilOrBeam,
+              int qExit)
+    {
+        incidentEnergy = incident.E;
+        incidentThetaX = incident.thetaX;
+        incidentThetaY = incident.thetaY;
+        recoilEnergy   = recoilOrBeam.E;
+        recoilThetaX   = recoilOrBeam.thetaX;
+        recoilThetaY   = recoilOrBeam.thetaY;
+        exitCharge     = static_cast<double>(qExit);
+
+        if (hEnergy)      hEnergy->Fill(recoilEnergy);
+        if (hAngles)      hAngles->Fill(recoilThetaX, recoilThetaY);
+        if (hExitCharge)  hExitCharge->Fill(qExit);
+        if (tree)         tree->Fill();
+    }
+
+    void fillReactionDepth(double depthMm, double beamEnergyMeV)
+    {
+        if (hReactionDepth)     hReactionDepth->Fill(depthMm);
+        if (hBeamEnergyVsDepth) hBeamEnergyVsDepth->Fill(depthMm, beamEnergyMeV);
+    }
+
+    void fillBeamDepth(double depthMm, double beamEnergyMeV)
+    {
+        if (hBeamEnergyVsDepth) hBeamEnergyVsDepth->Fill(depthMm, beamEnergyMeV);
+    }
+
+    void fillRecoilDepth(double depthMm, double recoilEnergyMeV)
+    {
+        if (hRecoilEnergyVsDepth) hRecoilEnergyVsDepth->Fill(depthMm, recoilEnergyMeV);
+    }
+};
+
+// Global pointer for recorder callbacks
+RootWriter* gRootWriter = nullptr;
+
+void recordBeamEnergyDepth(double depthMm, double energyMeV)
+{
+    if (gRootWriter) gRootWriter->fillBeamDepth(depthMm, energyMeV);
+}
+
+#endif // BEAMMC_WITH_ROOT
+
+} // anonymous namespace
 
 // -----------------------------------------------------------------------------
 // Main program
@@ -811,8 +1065,6 @@ int main(int argc, char** argv)
         DegraderConfig degrader = readDegrader("User_Input/degrader_input.txt");
         std::mt19937_64 random(beam.seed);
 
-        // Build the default target and degrader models. Reaction mode replaces
-        // the relevant SRIM files with projectile-specific tables below.
         TransportModel targetModel = buildTransportModel(target);
         TransportModel degraderModel;
 
@@ -820,13 +1072,31 @@ int main(int argc, char** argv)
             degraderModel = buildTransportModel(degrader);
         }
 
+        BeamMC::ChargeStateCalculator chargeCalculator;
+
         std::ofstream output;
+
 #ifdef BEAMMC_WITH_ROOT
-        RootWriter* rootWriter = 0;
-        if (beam.rootOutput) rootWriter = new RootWriter(beam.rootFile, mode);
+        RootWriter* rootWriter = nullptr;
+        if (beam.rootOutput) {
+            rootWriter = new RootWriter(
+                beam.rootFile,
+                target.thicknessMm,
+                degrader.enabled,
+                degrader.thicknessMm,
+                beam.energyMeV,
+                beam.stepMm);
+            gRootWriter = rootWriter;
+        }
 #else
-        if (beam.rootOutput) throw std::runtime_error("ROOT_OUTPUT is enabled, but BeamMC was compiled without ROOT support. Use -DBEAMMC_WITH_ROOT and root-config.");
+        if (beam.rootOutput) {
+            throw std::runtime_error(
+                "ROOT_OUTPUT is enabled, but BeamMC was compiled without ROOT support. "
+                "Compile with -DBEAMMC_WITH_ROOT and root-config.");
+        }
+        RootWriter* rootWriter = nullptr;
 #endif
+
         ReactionConfig reaction;
 
         if (mode == "reaction") {
@@ -834,6 +1104,10 @@ int main(int argc, char** argv)
 
             BeamMC::ExcitationPopulation excitationPopulation;
             if (!reaction.excitationPopulationFile.empty()) {
+                if (reaction.neutronSeparationMeV > 0.0) {
+                    excitationPopulation.setMaxExcitationMeV(
+                        reaction.neutronSeparationMeV);
+                }
                 excitationPopulation.load(reaction.excitationPopulationFile);
             }
 
@@ -851,6 +1125,17 @@ int main(int argc, char** argv)
             const TransportModel recoilTargetModel =
                 buildTransportModel(recoilTarget);
 
+            BeamMC::ReactionCrossSection reactionCrossSection;
+            ReactionDepthDistribution depthDistribution;
+
+            if (!reaction.reactionCrossSectionFile.empty()) {
+                reactionCrossSection.loadTALYSFile(
+                    reaction.reactionCrossSectionFile);
+
+                depthDistribution = buildReactionDepthDistribution(
+                    beam, target, targetModel, reactionCrossSection, reaction);
+            }
+
             // In reaction mode, the degrader table must describe the recoil.
             if (degrader.enabled) {
                 if (reaction.recoilDegraderSRIM.empty()) {
@@ -864,7 +1149,7 @@ int main(int argc, char** argv)
 
             output.open(reaction.output);
             output << "E_recoil_MeV,theta_x_mrad,theta_y_mrad,"
-                      "x_mm,y_mm,z_mm\n";
+                      "x_mm,y_mm,z_mm,q_exit\n";
 
             long long kinematicallyRejectedEvents = 0;
 
@@ -872,116 +1157,192 @@ int main(int argc, char** argv)
                 Particle incoming = generateInitialBeamParticle(beam, random);
                 const Particle incident = incoming;
 
-                // Uniform reaction depth between the front and back of target.
-                double depthMm = target.thicknessMm *
-                    std::generate_canonical<double, 64>(random);
-                depthMm = std::max(
-                    std::min(depthMm, target.thicknessMm),
-                    std::min(beam.stepMm, target.thicknessMm));
+                double depthMm = depthDistribution.sample(
+                    random, target, beam.stepMm);
 
                 // Transport the incoming beam to the reaction point.
                 propagate(incoming, targetModel, depthMm, beam.stepMm,
                           beam.Z, beam.A, beam.stragglingCoefficient, random);
 
+#ifdef BEAMMC_WITH_ROOT
+                if (beam.rootOutput && rootWriter) {
+                    rootWriter->fillReactionDepth(depthMm, incoming.E);
+                }
+#endif
+
                 // Generate the recoil at the reaction point.
                 const BeamMC::ExcitationPopulation* population =
-                    excitationPopulation.empty() ? 0 : &excitationPopulation;
+                    excitationPopulation.empty() ? nullptr : &excitationPopulation;
                 Particle recoil = generateRecoil(
                     incoming, reaction, random, population);
 
-                // A zero recoil energy means the sampled excitation is not
-                // kinematically accessible at this reaction energy.
                 if (recoil.E <= 0.0) {
                     ++kinematicallyRejectedEvents;
                     continue;
                 }
 
                 {
-                    // The recoil traverses the remainder of the target. The
-                    // path is angle-corrected and supports forward/backward
-                    // recoils exiting through either target surface.
-                    const double remainingTargetPath = pathToTargetSurface(
-                        depthMm, target.thicknessMm, recoil.dir);
+                    const double cosThetaZ = recoil.direction.z;
+                    const double pathMm =
+                        (cosThetaZ > 1.0e-6) ?
+                        (target.thicknessMm - depthMm) / cosThetaZ : 0.0;
 
-                    propagate(recoil, recoilTargetModel, remainingTargetPath,
-                              beam.stepMm, reaction.recoilZ, reaction.recoilA,
+                    propagate(recoil, recoilTargetModel, pathMm, beam.stepMm,
+                              reaction.recoilZ, reaction.recoilA,
                               beam.stragglingCoefficient, random);
-
-                    // Only a forward-going recoil reaches a downstream degrader.
-                    if (degrader.enabled && recoil.dir.z > 1.0e-9) {
-                        propagate(recoil, degraderModel,
-                                  degrader.thicknessMm / recoil.dir.z,
-                                  beam.stepMm, reaction.recoilZ, reaction.recoilA,
-                                  beam.stragglingCoefficient, random);
-                    }
                 }
 
-                output << std::setprecision(10)
-                       << recoil.E << ','
-                       << std::atan2(recoil.dir.x, recoil.dir.z) * 1000.0 << ','
-                       << std::atan2(recoil.dir.y, recoil.dir.z) * 1000.0 << ','
-                       << recoil.p.x << ','
-                       << recoil.p.y << ','
-                       << recoil.p.z << '\n';
+                if (degrader.enabled && recoil.direction.z > 0.0) {
+                    const double cosThetaZ = recoil.direction.z;
+                    const double pathMm =
+                        (cosThetaZ > 1.0e-6) ?
+                        degrader.thicknessMm / cosThetaZ : 0.0;
+
+                    propagate(recoil, degraderModel, pathMm, beam.stepMm,
+                              reaction.recoilZ, reaction.recoilA,
+                              beam.stragglingCoefficient, random);
+                }
+
+                // Determine medium from which the recoil exits.
+                const Material* exitMaterial = nullptr;
+                if (degrader.enabled && recoil.direction.z > 0.0) {
+                    exitMaterial = &degrader;
+                } else {
+                    exitMaterial = &target;
+                }
+
+                int qExit = 0;
+                if (exitMaterial) {
+                    BeamMC::ChargeStateResult cs =
+                        chargeCalculator.sample(
+                            reaction.recoilZ,
+                            reaction.recoilA,
+                            recoil.E,
+                            exitMaterial->effectiveZ,
+							beam.reducedWidthW,
+                            random);
+                    qExit = cs.sampledQ;
+                    recoil.chargeState = qExit;
+                }
+
+                output << recoil.E << ','
+                       << recoil.thetaX << ','
+                       << recoil.thetaY << ','
+                       << recoil.position.x << ','
+                       << recoil.position.y << ','
+                       << recoil.position.z << ','
+                       << qExit << '\n';
+
 #ifdef BEAMMC_WITH_ROOT
-                if (rootWriter) rootWriter->fill(incident, recoil);
+                if (beam.rootOutput && rootWriter) {
+                    rootWriter->fill(incident, recoil, qExit);
+                    rootWriter->fillRecoilDepth(recoil.position.z, recoil.E);
+                }
 #endif
             }
 
             std::cerr << "Reaction events rejected because the sampled "
                       << "excitation was kinematically inaccessible: "
                       << kinematicallyRejectedEvents << " / "
-                      << beam.particles << "\n";
-        } else {
+                      << beam.particles << '\n';
+
+        } else { // beam mode
             output.open(beam.output);
-            output << "E_out_MeV,theta_x_mrad,theta_y_mrad,"
-                      "x_mm,y_mm,z_mm\n";
+            output << "E_MeV,theta_x_mrad,theta_y_mrad,x_mm,y_mm,z_mm,q_exit\n";
 
             for (int event = 0; event < beam.particles; ++event) {
                 Particle particle = generateInitialBeamParticle(beam, random);
-                const Particle incident = particle;
 
-                // Transport the beam through the complete target.
-                propagate(particle, targetModel, target.thicknessMm,
-                          beam.stepMm, beam.Z, beam.A,
-                          beam.stragglingCoefficient, random);
-
-                // In beam mode, a downstream degrader uses the beam stopping
-                // table specified in degrader_input.txt.
-                if (degrader.enabled && particle.dir.z > 1.0e-9) {
-                    propagate(particle, degraderModel,
-                              degrader.thicknessMm / particle.dir.z,
+#ifdef BEAMMC_WITH_ROOT
+                if (beam.rootOutput && rootWriter) {
+                    propagate(particle, targetModel, target.thicknessMm,
+                              beam.stepMm, beam.Z, beam.A,
+                              beam.stragglingCoefficient, random,
+                              &recordBeamEnergyDepth);
+                } else {
+                    propagate(particle, targetModel, target.thicknessMm,
                               beam.stepMm, beam.Z, beam.A,
                               beam.stragglingCoefficient, random);
                 }
+#else
+                propagate(particle, targetModel, target.thicknessMm,
+                          beam.stepMm, beam.Z, beam.A,
+                          beam.stragglingCoefficient, random);
+#endif
 
-                output << std::setprecision(10)
-                       << particle.E << ','
-                       << std::atan2(particle.dir.x, particle.dir.z) * 1000.0 << ','
-                       << std::atan2(particle.dir.y, particle.dir.z) * 1000.0 << ','
-                       << particle.p.x << ','
-                       << particle.p.y << ','
-                       << particle.p.z << '\n';
+                if (degrader.enabled && particle.direction.z > 0.0) {
+                    const double cosThetaZ = particle.direction.z;
+                    const double pathMm =
+                        (cosThetaZ > 1.0e-6) ?
+                        degrader.thicknessMm / cosThetaZ : 0.0;
+
 #ifdef BEAMMC_WITH_ROOT
-                if (rootWriter) rootWriter->fill(incident, particle);
+                    if (beam.rootOutput && rootWriter) {
+                        propagate(particle, degraderModel, pathMm, beam.stepMm,
+                                  beam.Z, beam.A,
+                                  beam.stragglingCoefficient, random,
+                                  &recordBeamEnergyDepth);
+                    } else {
+                        propagate(particle, degraderModel, pathMm, beam.stepMm,
+                                  beam.Z, beam.A,
+                                  beam.stragglingCoefficient, random);
+                    }
+#else
+                    propagate(particle, degraderModel, pathMm, beam.stepMm,
+                              beam.Z, beam.A,
+                              beam.stragglingCoefficient, random);
+#endif
+                }
+
+                // Determine medium from which the beam exits.
+                const Material* exitMaterial = nullptr;
+                if (degrader.enabled && particle.direction.z > 0.0) {
+                    exitMaterial = &degrader;
+                } else {
+                    exitMaterial = &target;
+                }
+
+                int qExit = 0;
+                if (exitMaterial) {
+                    BeamMC::ChargeStateResult cs =
+                        chargeCalculator.sample(
+                            beam.Z,
+                            beam.A,
+                            particle.E,
+                            exitMaterial->effectiveZ,
+							beam.reducedWidthW,
+                            random);
+                    qExit = cs.sampledQ;
+                    particle.chargeState = qExit;
+                }
+
+                output << particle.E << ','
+                       << particle.thetaX << ','
+                       << particle.thetaY << ','
+                       << particle.position.x << ','
+                       << particle.position.y << ','
+                       << particle.position.z << ','
+                       << qExit << '\n';
+
+#ifdef BEAMMC_WITH_ROOT
+                if (beam.rootOutput && rootWriter) {
+                    rootWriter->fill(particle, particle, qExit);
+                }
 #endif
             }
         }
 
-        if (!output) {
-            throw std::runtime_error("Could not open output file");
-        }
-
 #ifdef BEAMMC_WITH_ROOT
-        delete rootWriter;
+        if (rootWriter) {
+            gRootWriter = nullptr;
+            delete rootWriter;
+            rootWriter = nullptr;
+        }
 #endif
-        std::cerr << "Completed " << beam.particles
-                  << " particles using seed " << beam.seed << "\n";
-    }
-    catch (const std::exception& error) {
-        std::cerr << "ERROR: " << error.what() << "\n";
+
+        return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "BeamMC error: " << ex.what() << '\n';
         return 1;
     }
-
-    return 0;
 }
